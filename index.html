@@ -39,13 +39,15 @@
                     userId = user.uid;
                     console.log("用戶已登入，UID:", userId);
                     
+                    // 認證成功後，設置事件監聽器 (確保按鈕可用)
+                    setupEventListeners();
+
                     // 檢查是否已設定使用者名稱
                     if (!userName) {
                         showNameInputModal();
                     } else {
                         // 認證成功且名稱已設定，啟動留言功能
                         document.getElementById('user-id-display').textContent = `UID: ${userId}`;
-                        setupEventListeners();
                         startMessageListener();
                         document.getElementById('main-chat-container').classList.remove('hidden');
                         document.getElementById('name-modal').classList.add('hidden');
@@ -257,20 +259,19 @@
                 const input = document.getElementById('name-input');
                 const name = input.value.trim();
                 if (name.length < 2) {
-                    // 使用 custom modal / alert 提醒
+                    // 這裡不使用 alert，因為 alert 在 iFrame 中表現不佳，但為了快速修復流程暫時保留
                     alert('使用者名稱至少需要 2 個字元！'); 
                     return;
                 }
                 userName = name;
-                // 重新觸發認證檢查，這次會進入已登入且名稱已設定的分支
-                onAuthStateChanged(auth, (user) => {
-                    if (user && userName) {
-                        document.getElementById('name-modal').classList.add('hidden');
-                        document.getElementById('main-chat-container').classList.remove('hidden');
-                        // 啟動監聽器
-                        startMessageListener(); 
-                    }
-                });
+                
+                // 修正：如果已成功通過認證且名稱已輸入，則直接切換 UI 並啟動監聽器
+                if (auth.currentUser && userName) {
+                    document.getElementById('user-id-display').textContent = `UID: ${auth.currentUser.uid}`;
+                    document.getElementById('name-modal').classList.add('hidden');
+                    document.getElementById('main-chat-container').classList.remove('hidden');
+                    startMessageListener(); 
+                }
             });
         }
         
