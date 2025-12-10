@@ -20,7 +20,9 @@
         let isAuthReady = false; // 追蹤 Firebase 認證是否完成
 
         // --- Firebase 初始化和認證 ---
-        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        // **修正點：更安全地處理全域變數，確保在不存在時不會引發致命錯誤**
+        const rawFirebaseConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : '{}';
+        const firebaseConfig = JSON.parse(rawFirebaseConfig);
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         async function initApp() {
@@ -28,7 +30,9 @@
             const chatInterface = document.getElementById('chat-interface');
 
             if (Object.keys(firebaseConfig).length === 0) {
-                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。</p>';
+                // 如果在 Canvas 環境中仍缺少配置，則顯示錯誤。
+                // 如果在 GitHub Pages 上，這會導致錯誤，但這是預期行為，因為您需要手動配置。
+                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。請確保在支援的環境中運行。</p>';
                 return;
             }
 
@@ -37,11 +41,11 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
 
-                // **關鍵修正 1: 初始化後立即顯示 UI，不再等待認證**
+                // **初始化後立即顯示 UI**
                 loadingIndicator.classList.add('hidden');
                 chatInterface.classList.remove('hidden');
 
-                // 啟動事件綁定 (無論是否登入成功，UI 都可操作)
+                // 啟動事件綁定
                 setupEventListeners();
                 
                 // 嘗試處理登入流程
