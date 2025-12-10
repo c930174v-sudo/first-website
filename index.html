@@ -1,1 +1,189 @@
-��
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>照片拖曳顯示器</title>
+    <!-- 引入 Tailwind CSS 確保響應式和現代化的樣式 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* 設置全局字體為 Inter */
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+        }
+        /* 讓拖曳區的虛線樣式更清晰 */
+        #drop-zone {
+            transition: all 0.3s ease;
+        }
+        .drag-over {
+            border-color: #3b82f6 !important; /* 拖曳時邊框變藍色 */
+            background-color: #eff6ff !important; /* 拖曳時背景變淺藍色 */
+        }
+    </style>
+</head>
+<body class="bg-gray-50 p-4 sm:p-8">
+
+    <div class="max-w-4xl mx-auto">
+        <header class="text-center mb-10">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">📸 照片拖曳預覽</h1>
+            <p class="text-gray-500 text-lg">將您的圖片檔案拖曳到下方區域即可顯示。</p>
+        </header>
+
+        <!-- 拖曳區 (Drop Zone) -->
+        <div id="drop-zone" 
+             class="w-full h-64 flex items-center justify-center p-6 border-4 border-dashed border-gray-300 rounded-xl cursor-pointer hover:border-blue-400 bg-white shadow-lg mb-10">
+            <p class="text-xl font-semibold text-gray-500">將圖片拖曳到此處或點擊選擇檔案</p>
+            <!-- 隱藏的檔案輸入框，用於點擊時選擇檔案 -->
+            <input type="file" id="file-input" accept="image/*" multiple class="hidden">
+        </div>
+
+        <!-- 圖片顯示區 (Image Display Area) -->
+        <h2 class="text-2xl font-bold text-gray-800 mb-4">🖼️ 載入的圖片</h2>
+        <div id="image-display" 
+             class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+            <!-- 載入的圖片將會顯示在這裡 -->
+        </div>
+
+        <!-- 錯誤或訊息顯示區 -->
+        <div id="message-box" class="mt-8 p-4 bg-red-100 text-red-700 border border-red-300 rounded-lg hidden">
+            <!-- 錯誤訊息將顯示在這裡 -->
+        </div>
+
+    </div>
+
+    <script>
+        // 獲取 DOM 元素
+        const dropZone = document.getElementById('drop-zone');
+        const imageDisplay = document.getElementById('image-display');
+        const fileInput = document.getElementById('file-input');
+        const messageBox = document.getElementById('message-box');
+
+        // --- 輔助函數 ---
+
+        // 顯示訊息或錯誤
+        function showMessage(text, isError = false) {
+            messageBox.textContent = text;
+            messageBox.className = `mt-8 p-4 rounded-lg border ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'}`;
+            messageBox.classList.remove('hidden');
+        }
+
+        // 隱藏訊息框
+        function hideMessage() {
+            messageBox.classList.add('hidden');
+        }
+
+        // 處理單個檔案的讀取與顯示
+        function processFile(file) {
+            // 檢查檔案類型是否為圖片
+            if (!file.type.startsWith('image/')) {
+                showMessage(`檔案 "${file.name}" 不是有效的圖片格式。`, true);
+                return;
+            }
+
+            const reader = new FileReader();
+
+            // 檔案讀取完成後觸發
+            reader.onload = function(e) {
+                // 1. 建立一個新的圖片容器 (div)
+                const imgContainer = document.createElement('div');
+                imgContainer.className = 'bg-white p-2 rounded-lg shadow-md hover:shadow-xl transition duration-300 overflow-hidden';
+
+                // 2. 建立一個 img 元素
+                const img = document.createElement('img');
+                img.src = e.target.result; // 將檔案的 Data URL 賦值給 src
+                img.alt = file.name;
+                img.className = 'w-full h-auto object-cover rounded-md';
+
+                // 3. 建立檔案名稱標籤
+                const nameTag = document.createElement('p');
+                nameTag.textContent = file.name;
+                nameTag.title = file.name;
+                nameTag.className = 'mt-2 text-sm text-gray-600 truncate'; // truncate 讓長檔名不會溢出
+
+                // 4. 將元素加入到容器
+                imgContainer.appendChild(img);
+                imgContainer.appendChild(nameTag);
+
+                // 5. 將容器加入到顯示區的最前面 (最新的在最上面)
+                imageDisplay.prepend(imgContainer);
+            };
+
+            // 開始讀取檔案，將其轉換為 Data URL (Base64 編碼)
+            reader.readAsDataURL(file);
+        }
+
+        // 處理拖曳或選擇的多個檔案
+        function handleFiles(files) {
+            hideMessage();
+            if (files.length === 0) {
+                showMessage("沒有選擇任何檔案。", true);
+                return;
+            }
+
+            let validFileCount = 0;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    processFile(file);
+                    validFileCount++;
+                }
+            }
+            
+            if (validFileCount > 0) {
+                showMessage(`成功載入 ${validFileCount} 張圖片！`, false);
+            }
+        }
+
+        // --- 事件監聽器 ---
+
+        // 1. 拖曳檔案進入 (Drag Enter/Over) 事件：顯示視覺回饋
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault(); // 阻止瀏覽器預設行為
+                e.stopPropagation();
+                dropZone.classList.add('drag-over');
+            }, false);
+        });
+
+        // 2. 拖曳檔案離開 (Drag Leave) 事件：移除視覺回饋
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropZone.classList.remove('drag-over');
+            }, false);
+        });
+        
+        // 3. 拖曳放下 (Drop) 事件：處理檔案
+        dropZone.addEventListener('drop', (e) => {
+            // 獲取拖曳進來的檔案列表
+            const files = e.dataTransfer.files; 
+            handleFiles(files);
+        }, false);
+        
+        // 4. 點擊區域選擇檔案 (Click to Select)
+        dropZone.addEventListener('click', () => {
+            // 模擬點擊隱藏的檔案輸入框
+            fileInput.click();
+        });
+
+        // 5. 檔案輸入框變化 (File Input Change) 事件：處理選擇的檔案
+        fileInput.addEventListener('change', (e) => {
+            // 獲取使用者選擇的檔案列表
+            const files = e.target.files;
+            handleFiles(files);
+            // 清空輸入框，以便可以再次選擇相同的檔案
+            e.target.value = null; 
+        });
+
+        // 額外處理整個視窗的拖曳事件，防止拖曳到非指定區域時檔案在新分頁打開
+        document.body.addEventListener('dragover', (e) => {
+            e.preventDefault();
+        }, false);
+        document.body.addEventListener('drop', (e) => {
+            e.preventDefault();
+        }, false);
+        
+    </script>
+</body>
+</html>
