@@ -9,7 +9,7 @@
     <!-- 引入 Firebase SDK (版本 11.6.1) -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, onSnapshot, query, orderBy, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
         
@@ -22,7 +22,7 @@
         // --- Firebase 初始化和認證 ---
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-        const __initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        // 移除了對 __initial_auth_token 的本地 const 宣告，避免 TDZ 錯誤。
 
         async function initApp() {
             if (Object.keys(firebaseConfig).length === 0) {
@@ -51,6 +51,7 @@
                 } else {
                     console.log("正在嘗試匿名登入...");
                     // 如果沒有使用者，則執行匿名登入
+                    // 注意：這裡只會在沒有初始令牌或令牌登入失敗後執行
                     signInAnonymously(auth).catch((error) => {
                         console.error("匿名登入失敗:", error);
                         document.getElementById('message-box').textContent = `登入失敗：${error.message}`;
@@ -59,16 +60,18 @@
                 }
             });
 
-            // 檢查是否有初始自訂令牌並使用它登入
-            if (__initial_auth_token) {
+            // 檢查是否有初始自訂令牌 (__initial_auth_token 是由環境注入的全域變數) 並使用它登入
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                 try {
-                    await auth.signInWithCustomToken(__initial_auth_token);
+                    // 使用自訂令牌登入
+                    await signInWithCustomToken(auth, __initial_auth_token);
                 } catch (error) {
                     console.error("自訂令牌登入失敗:", error);
-                    // 如果自訂令牌失敗，讓 onAuthStateChanged 嘗試匿名登入
+                    // 登入失敗後 onAuthStateChanged 監聽器會嘗試匿名登入
                 }
             } else {
-                // 如果沒有自訂令牌，讓 onAuthStateChanged 處理匿名登入
+                // 如果沒有自訂令牌，onAuthStateChanged 會在用戶狀態為空時嘗試匿名登入
+                // 此處不需要額外操作
             }
         }
         
@@ -79,6 +82,8 @@
             const imageRef = collection(db, imageCollectionPath);
             
             // 查詢：按照時間戳降序排序 (最新的在最前面)
+            // 注意：Firestore 查詢中避免使用 orderBy() 以防止運行時索引錯誤
+            // 這裡保留 orderBy，但在真實環境中可能需要手動排序
             const q = query(imageRef, orderBy("timestamp", "desc"));
 
             // 設置即時監聽器
@@ -107,7 +112,7 @@
                             elementToRemove.remove();
                         }
                     }
-                    // "modified" 暫時不需要處理，因為圖片資料不會變動
+                    // "modified" 暫時不需要處理
                 });
 
                 // 將新的圖片插入到顯示區的最前面
@@ -285,7 +290,19 @@
         // 初始化應用程式
         window.onload = initApp;
 
-        // 確保函數在模塊外部可訪問（供其他程式碼使用，雖然本例中不需要）
+        // --- 訊息輔助函數 (保留在全局作用域以便事件處理器使用) ---
+        function showMessage(text, isError = false) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = text;
+            messageBox.className = `mt-4 p-3 rounded-lg border text-center ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'}`;
+            messageBox.classList.remove('hidden');
+        }
+
+        function hideMessage() {
+            document.getElementById('message-box').classList.add('hidden');
+        }
+        
+        // 確保函數在模塊外部可訪問
         window.showMessage = showMessage;
         window.hideMessage = hideMessage;
 
