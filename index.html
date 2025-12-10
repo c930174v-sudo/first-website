@@ -17,16 +17,18 @@
         let auth;
         let userId;
         let userName = ''; // 用於儲存使用者輸入的名稱
-        const LOCAL_STORAGE_USERNAME_KEY = 'chat_username'; // 用於本地儲存使用者名稱
+        let isAuthReady = false; // 追蹤 Firebase 認證是否完成
 
         // --- Firebase 初始化和認證 ---
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         async function initApp() {
+            // 由於 onAuthStateChanged 監聽器是異步的，我們將在它內部處理所有 UI 顯示邏輯
+            
             if (Object.keys(firebaseConfig).length === 0) {
-                document.getElementById('message-box').textContent = "錯誤：缺少 Firebase 設定。無法啟用雲端留言功能。";
-                document.getElementById('message-box').classList.remove('hidden');
+                // 致命錯誤：無法連線
+                document.getElementById('loading-indicator').innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。</p>';
                 return;
             }
 
@@ -34,42 +36,45 @@
             db = getFirestore(app);
             auth = getAuth(app);
             
-            // 從本地儲存載入使用者名稱
-            userName = localStorage.getItem(LOCAL_STORAGE_USERNAME_KEY) || '';
-            
             // 設置匿名登入/認證監聽器
             onAuthStateChanged(auth, async (user) => {
                 const loadingIndicator = document.getElementById('loading-indicator');
-                
+
                 if (user) {
                     userId = user.uid;
+                    isAuthReady = true;
                     console.log("用戶已登入，UID:", userId);
                     
-                    // 認證成功後，移除載入提示，啟動主介面功能
+                    // 認證成功後，移除載入提示，顯示聊天介面
                     loadingIndicator.classList.add('hidden');
                     document.getElementById('chat-interface').classList.remove('hidden');
                     
+                    // 啟動功能
                     setupUI();
-                    setupEventListeners(); // 確保事件已綁定
                     startMessageListener();
                     
                 } else {
-                    console.log("正在嘗試匿名登入...");
-                    // 處理登入邏輯
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                         try {
-                             await signInWithCustomToken(auth, __initial_auth_token);
-                         } catch (error) {
-                             console.error("自訂令牌登入失敗:", error);
-                             // 如果自訂令牌失敗，嘗試匿名登入
-                             signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
-                         }
-                     } else {
-                         // 匿名登入
-                         signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
-                     }
+                    // 如果用戶狀態為空 (初次載入)
+                    try {
+                        console.log("正在嘗試登入...");
+                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                            await signInWithCustomToken(auth, __initial_auth_token);
+                        } else {
+                            await signInAnonymously(auth);
+                        }
+                    } catch (error) {
+                        // 登入失敗的錯誤處理
+                        isAuthReady = true;
+                        loadingIndicator.innerHTML = `<p class="mt-4 text-red-600 font-semibold">登入失敗，請檢查網路。錯誤碼: ${error.code}</p>`;
+                        console.error("Firebase 登入失敗:", error);
+                        document.getElementById('chat-interface').classList.add('hidden'); // 隱藏聊天介面
+                    }
                 }
             });
+            
+            // **修正點 1: 在 onAuthStateChanged 外部先綁定事件**
+            // 這樣可以確保即使認證流程還在跑，輸入名稱欄位也能工作，防止按鈕失效。
+            setupEventListeners(); 
         }
         
         // --- 留言資料庫操作 ---
@@ -77,8 +82,9 @@
 
         // 啟動留言即時監聽
         function startMessageListener() {
+            if (!isAuthReady || !db) return; // 確保 Firebase 已準備好
+
             const messageRef = collection(db, MESSAGE_COLLECTION_PATH);
-            // 查詢：按照時間戳升序排序 (最新的在最下面)
             const q = query(messageRef, orderBy("timestamp", "asc"));
             const messageDisplay = document.getElementById('message-display');
 
@@ -86,9 +92,9 @@
                 // 如果留言為空，顯示提示訊息
                 if (snapshot.size === 0) {
                      messageDisplay.innerHTML = getChatPlaceholder();
+                     messageDisplay.scrollTop = messageDisplay.scrollHeight;
                      return;
                 } else {
-                    // 如果有留言，確保移除提示訊息
                     const placeholder = document.getElementById('empty-chat-placeholder');
                     if (placeholder) {
                         placeholder.remove();
@@ -99,30 +105,25 @@
                     const data = change.doc.data();
                     const docId = change.doc.id;
 
-                    // 處理新增和修改 (當伺服器時間戳返回時，類型會從 'added' 變為 'modified' 或直接為 'added')
+                    // 處理新增和修改 (確保時間戳更新)
+                    const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
+                    
                     if (change.type === "added") {
-                        // 新增留言: 如果元素已存在 (因為是本地發送的)，則移除舊的（pending）並重新添加新的（server-confirmed）
-                        const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
-                        if (existingElement) {
-                            existingElement.remove();
+                        // 僅在元素不存在時新增，如果存在（表示是本地發送的 pending 狀態），等待 modified
+                        if (!existingElement) {
+                            appendMessage(data, docId);
                         }
-                        appendMessage(data, docId);
                     } else if (change.type === "modified") {
-                        // 留言修改 (例如：從 pending server timestamp 轉為實際時間戳)
-                        // 我們可以移除舊元素並重新添加，確保時間更新
-                         const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
+                        // 伺服器時間戳返回時 (modified)
                         if (existingElement) {
                             existingElement.remove();
                         }
                         appendMessage(data, docId);
                     } else if (change.type === "removed") {
-                        // 留言刪除
-                        const elementToRemove = document.querySelector(`[data-doc-id="${docId}"]`);
                         if (elementToRemove) elementToRemove.remove();
                     }
                 });
                 
-                // 保持聊天視窗滾動到最新留言
                 messageDisplay.scrollTop = messageDisplay.scrollHeight;
             });
         }
@@ -139,19 +140,22 @@
             if (!db || !userId || text.trim() === '') return;
 
             try {
+                // 為了讓使用者體驗更好，我們在本地顯示 '發送中...'
+                const tempDocId = 'temp-' + Date.now();
+                appendMessage({ text: text, userName: userName, userId: userId, timestamp: null }, tempDocId);
+
                 await addDoc(collection(db, MESSAGE_COLLECTION_PATH), {
                     text: text,
                     userName: userName,
                     userId: userId,
                     timestamp: serverTimestamp() // 儲存 UTC 時間戳
                 });
-                document.getElementById('message-input').value = ''; // 清空輸入框
                 
-                // 移除空白提示，如果它還存在
-                const placeholder = document.getElementById('empty-chat-placeholder');
-                if (placeholder) {
-                    placeholder.remove();
-                }
+                // 移除臨時的 pending 訊息，讓 onSnapshot 顯示帶有伺服器時間戳的訊息
+                const tempElement = document.querySelector(`[data-doc-id="${tempDocId}"]`);
+                if(tempElement) tempElement.remove();
+                
+                document.getElementById('message-input').value = ''; 
                 
             } catch (error) {
                 console.error("發送留言失敗:", error);
@@ -163,7 +167,7 @@
         
         // 格式化時間 (台灣時區 GMT+8)
         function formatTime(timestamp) {
-            // 檢查 toDate 函式是否存在。如果它處於發送中的 pending 狀態，它會被判斷為 '發送中...'
+            // 檢查 toDate 函式是否存在。如果為 null，則顯示 '發送中...'
             if (!timestamp || typeof timestamp.toDate !== 'function') {
                 return '發送中...'; 
             }
@@ -248,7 +252,7 @@
         function showMessage(text, isError = false) {
             const messageBox = document.getElementById('message-box');
             messageBox.textContent = text;
-            messageBox.className = `p-2 bg-red-100 text-red-700 border-b border-red-300 text-center text-sm`;
+            messageBox.className = `p-2 ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'} border-b text-center text-sm`;
             messageBox.classList.remove('hidden');
             setTimeout(() => { messageBox.classList.add('hidden'); }, 5000); // 5秒後自動隱藏
         }
@@ -303,13 +307,8 @@
             // 監聽名稱輸入欄位的變動
             nameInputField.addEventListener('input', () => {
                 const newName = nameInputField.value.trim();
-                if (newName.length >= 2) {
-                    userName = newName;
-                    localStorage.setItem(LOCAL_STORAGE_USERNAME_KEY, userName);
-                } else {
-                    // 如果名稱太短，只更新本地變數，但不允許發送
-                    userName = newName;
-                }
+                // 每次輸入都更新 userName，但只有在滿足長度要求時才更新按鈕狀態
+                userName = newName;
                 updateChatButtonState();
             });
         }
@@ -326,6 +325,7 @@
             min-height: 100vh;
             background-color: #f3f4f6; /* 淺灰色背景 */
         }
+        /* 載入指示器的樣式 */
         .lds-dual-ring {
             display: inline-block;
             width: 80px;
@@ -359,9 +359,9 @@
     <div id="main-chat-container" class="max-w-3xl mx-auto h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden">
         
         <!-- 載入指示器 -->
-        <div id="loading-indicator" class="flex flex-col items-center justify-center flex-grow p-10 text-gray-500">
-            <div class="lds-dual-ring"></div>
-            <p class="mt-4 font-semibold">正在連線至雲端服務...</p>
+        <div id="loading-indicator" class="absolute inset-0 bg-white flex flex-col items-center justify-center z-10">
+             <div class="lds-dual-ring"></div>
+             <p class="mt-4 font-semibold text-gray-500">正在連線至雲端服務...</p>
         </div>
 
         <!-- 聊天介面內容 (初始隱藏，直到認證完成) -->
