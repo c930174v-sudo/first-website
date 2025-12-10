@@ -3,32 +3,413 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>我的第一個靜態網頁 - 動物</title>
-    <!-- 引入 Tailwind CSS 確保響應式和現代化的樣式 -->
+    <title>極簡即時留言板</title>
+    <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Firebase SDK (版本 11.6.1) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, query, orderBy, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        // --- 全局變數 ---
+        let db;
+        let auth;
+        let userId;
+        let userName = ''; // 用於儲存使用者輸入的名稱
+        let isAuthReady = false; // 追蹤 Firebase 認證是否完成
+
+        // --- Firebase 初始化和認證 ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        async function initApp() {
+            const loadingIndicator = document.getElementById('loading-indicator');
+            const chatInterface = document.getElementById('chat-interface');
+
+            if (Object.keys(firebaseConfig).length === 0) {
+                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。</p>';
+                return;
+            }
+
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // **關鍵修正 1: 初始化後立即顯示 UI，不再等待認證**
+                loadingIndicator.classList.add('hidden');
+                chatInterface.classList.remove('hidden');
+
+                // 啟動事件綁定 (無論是否登入成功，UI 都可操作)
+                setupEventListeners();
+                
+                // 嘗試處理登入流程
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        console.log("用戶已登入，UID:", userId);
+                        
+                        setupUI(); // 更新 UID 和按鈕狀態
+                        startMessageListener(); // 啟動資料庫監聽
+                        
+                    } else {
+                        // 嘗試匿名登入
+                        try {
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            // 登入失敗：顯示警告並停用發送按鈕
+                            isAuthReady = false;
+                            showMessage(`警告：連線至 Firebase 失敗 (${error.code})。留言功能將停用。`, true);
+                            document.getElementById('send-button').disabled = true;
+                            document.getElementById('send-button').textContent = '連線失敗';
+                            console.error("Firebase 登入失敗:", error);
+                        }
+                    }
+                });
+
+            } catch (error) {
+                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">初始化服務失敗，請檢查網頁控制台。</p>';
+                console.error("Firebase 初始化失敗:", error);
+            }
+        }
+        
+        // --- 留言資料庫操作 ---
+        const MESSAGE_COLLECTION_PATH = `artifacts/${appId}/public/data/messages`;
+
+        // 啟動留言即時監聽
+        function startMessageListener() {
+            if (!isAuthReady || !db) return; // 確保 Firebase 已準備好
+
+            const messageRef = collection(db, MESSAGE_COLLECTION_PATH);
+            const q = query(messageRef, orderBy("timestamp", "asc"));
+            const messageDisplay = document.getElementById('message-display');
+
+            onSnapshot(q, (snapshot) => {
+                // 如果留言為空，顯示提示訊息
+                if (snapshot.size === 0) {
+                     messageDisplay.innerHTML = getChatPlaceholder();
+                     messageDisplay.scrollTop = messageDisplay.scrollHeight;
+                     return;
+                } else {
+                    const placeholder = document.getElementById('empty-chat-placeholder');
+                    if (placeholder) {
+                        placeholder.remove();
+                    }
+                }
+
+                snapshot.docChanges().forEach(change => {
+                    const data = change.doc.data();
+                    const docId = change.doc.id;
+
+                    const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
+                    
+                    if (change.type === "added") {
+                        if (!existingElement) {
+                            appendMessage(data, docId);
+                        }
+                    } else if (change.type === "modified") {
+                        // 伺服器時間戳返回時，移除舊的，替換成新的
+                        if (existingElement) {
+                            existingElement.remove();
+                        }
+                        appendMessage(data, docId);
+                    } else if (change.type === "removed") {
+                        const elementToRemove = document.querySelector(`[data-doc-id="${docId}"]`);
+                        if (elementToRemove) elementToRemove.remove();
+                    }
+                });
+                
+                messageDisplay.scrollTop = messageDisplay.scrollHeight;
+            });
+        }
+        
+        // 發送留言
+        async function sendMessage(text) {
+            if (!isAuthReady) {
+                showMessage("系統尚未連線，無法發送留言。", true);
+                return;
+            }
+            // 檢查名稱是否設定
+            if (!userName || userName.length < 2) {
+                showMessage("請先在上方輸入您的使用者名稱 (至少 2 個字元)。", true);
+                document.getElementById('name-input-field').focus();
+                return;
+            }
+
+            if (!db || !userId || text.trim() === '') return;
+
+            try {
+                // 在本地顯示一個 '發送中...' 的臨時訊息
+                const tempDocId = 'temp-' + Date.now();
+                appendMessage({ text: text, userName: userName, userId: userId, timestamp: null }, tempDocId);
+
+                await addDoc(collection(db, MESSAGE_COLLECTION_PATH), {
+                    text: text,
+                    userName: userName,
+                    userId: userId,
+                    timestamp: serverTimestamp() // 儲存 UTC 時間戳
+                });
+                
+                // 移除臨時的 pending 訊息，讓 onSnapshot 顯示帶有伺服器時間戳的訊息
+                const tempElement = document.querySelector(`[data-doc-id="${tempDocId}"]`);
+                if(tempElement) tempElement.remove();
+                
+                document.getElementById('message-input').value = ''; 
+                
+            } catch (error) {
+                console.error("發送留言失敗:", error);
+                showMessage("發送失敗，請檢查網路連線。", true);
+            }
+        }
+
+        // --- 介面渲染和事件 ---
+        
+        // 格式化時間 (台灣時區 GMT+8)
+        function formatTime(timestamp) {
+            // 檢查 toDate 函式是否存在。如果為 null，則顯示 '發送中...'
+            if (!timestamp || typeof timestamp.toDate !== 'function') {
+                return '發送中...'; 
+            }
+
+            const date = timestamp.toDate();
+            
+            return date.toLocaleString('zh-TW', {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+                day: '2-digit',
+                month: '2-digit',
+                year: 'numeric',
+                timeZone: 'Asia/Taipei' // 設定台灣時區
+            });
+        }
+
+        // 獲取聊天室空白時的提示訊息 HTML
+        function getChatPlaceholder() {
+            return `
+                <div id="empty-chat-placeholder" class="text-center py-10 text-gray-400">
+                    <svg class="w-10 h-10 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.56 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"></path></svg>
+                    <p class="text-lg font-medium">👋 歡迎！目前沒有留言。</p>
+                    <p class="text-sm">輸入您的第一則訊息，即刻開始聊天吧！</p>
+                </div>
+            `;
+        }
+        
+        // 將留言追加到聊天視窗
+        function appendMessage(data, docId) {
+            const messageDisplay = document.getElementById('message-display');
+            // 檢查是否已存在，避免重複添加
+            if (document.querySelector(`[data-doc-id="${docId}"]`)) return;
+
+            const isCurrentUser = data.userId === userId;
+            
+            const messageDiv = document.createElement('div');
+            messageDiv.dataset.docId = docId;
+            messageDiv.className = `flex mb-4 ${isCurrentUser ? 'justify-end' : 'justify-start'}`;
+
+            const bubbleClass = isCurrentUser 
+                ? 'bg-blue-600 text-white rounded-br-none' 
+                : 'bg-white text-gray-800 rounded-tl-none border border-gray-200 shadow-md';
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = `max-w-xs sm:max-w-md px-4 py-3 rounded-xl ${bubbleClass} flex flex-col`;
+
+            // 1. 使用者名稱和時間
+            const header = document.createElement('div');
+            header.className = `flex text-xs mb-1 ${isCurrentUser ? 'justify-end text-blue-200' : 'justify-start text-gray-500'}`;
+
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = isCurrentUser ? (userName || '您') : data.userName;
+            nameSpan.className = 'font-bold mr-2';
+
+            const timeSpan = document.createElement('span');
+            // 這裡使用 formatTime 處理 Firebase 時間戳
+            timeSpan.textContent = formatTime(data.timestamp); 
+            timeSpan.className = 'text-xs italic';
+
+            // 將名稱和時間組合
+            if (isCurrentUser) {
+                header.appendChild(timeSpan);
+                header.appendChild(nameSpan);
+            } else {
+                header.appendChild(nameSpan);
+                header.appendChild(timeSpan);
+            }
+            contentDiv.appendChild(header);
+
+            // 2. 留言內容
+            const textContent = document.createElement('p');
+            textContent.textContent = data.text;
+            textContent.className = 'text-sm break-words';
+            contentDiv.appendChild(textContent);
+
+            messageDiv.appendChild(contentDiv);
+            messageDisplay.appendChild(messageDiv);
+        }
+        
+        // 訊息輔助函數
+        function showMessage(text, isError = false) {
+            const messageBox = document.getElementById('message-box');
+            messageBox.textContent = text;
+            messageBox.className = `p-2 ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'} border-b text-center text-sm`;
+            messageBox.classList.remove('hidden');
+            setTimeout(() => { messageBox.classList.add('hidden'); }, 5000); // 5秒後自動隱藏
+        }
+
+        // 初始化 UI 狀態
+        function setupUI() {
+            document.getElementById('name-input-field').value = userName;
+            document.getElementById('user-id-display').textContent = `UID: ${userId}`;
+            updateChatButtonState();
+        }
+
+        // 更新發送按鈕狀態
+        function updateChatButtonState() {
+            const sendButton = document.getElementById('send-button');
+            const nameField = document.getElementById('name-input-field');
+            
+            if (userName.length < 2) {
+                sendButton.disabled = true;
+                sendButton.textContent = '請輸入名稱';
+                sendButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+                sendButton.classList.add('bg-gray-400', 'cursor-not-allowed');
+                nameField.classList.add('border-red-500');
+            } else {
+                sendButton.disabled = false;
+                sendButton.textContent = '發送';
+                sendButton.classList.remove('bg-gray-400', 'cursor-not-allowed', 'border-red-500');
+                sendButton.classList.add('bg-blue-600', 'hover:bg-blue-700');
+                nameField.classList.remove('border-red-500');
+            }
+        }
+
+
+        // 設定所有事件監聽器
+        function setupEventListeners() {
+            const messageInput = document.getElementById('message-input');
+            const sendButton = document.getElementById('send-button');
+            const nameInputField = document.getElementById('name-input-field');
+
+            // 點擊發送按鈕
+            sendButton.addEventListener('click', () => {
+                sendMessage(messageInput.value);
+            });
+
+            // 按下 Enter 鍵發送
+            messageInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault(); 
+                    sendMessage(messageInput.value);
+                }
+            });
+            
+            // 監聽名稱輸入欄位的變動
+            nameInputField.addEventListener('input', () => {
+                const newName = nameInputField.value.trim();
+                // 每次輸入都更新 userName，但只有在滿足長度要求時才更新按鈕狀態
+                userName = newName;
+                updateChatButtonState();
+            });
+        }
+        
+        // 初始化應用程式
+        window.onload = initApp;
+
+    </script>
+
     <style>
+        /* 設置全局字體為 Inter */
         body {
             font-family: 'Inter', sans-serif;
             min-height: 100vh;
+            background-color: #f3f4f6; /* 淺灰色背景 */
         }
+        /* 載入指示器的樣式 */
+        .lds-dual-ring {
+            display: inline-block;
+            width: 80px;
+            height: 80px;
+        }
+        .lds-dual-ring:after {
+            content: " ";
+            display: block;
+            width: 64px;
+            height: 64px;
+            margin: 8px;
+            border-radius: 50%;
+            border: 6px solid #ccc;
+            border-color: #3b82f6 transparent #3b82f6 transparent;
+            animation: lds-dual-ring 1.2s linear infinite;
+        }
+        @keyframes lds-dual-ring {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
     </style>
 </head>
-<body class="bg-gray-100 flex items-center justify-center p-8">
+<body class="p-4 sm:p-8">
 
-    <div class="max-w-xl w-full bg-white p-6 sm:p-10 rounded-xl shadow-2xl text-center">
-        <h1 class="text-3xl font-bold text-gray-800 mb-6">隨機動物圖片</h1>
-        <p class="text-gray-600 mb-8">這是一張可愛動物的圖片，用於測試網站的基本載入功能。</p>
+    <!-- 主聊天介面 (始終可見) -->
+    <div id="main-chat-container" class="max-w-3xl mx-auto h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden">
         
-        <!-- 動物圖片區塊 - 使用 Placeholder 服務 -->
-        <img 
-            src="https://placehold.co/800x600/60a5fa/ffffff?text=可愛的小動物" 
-            alt="一張隨機的可愛小動物圖片"
-            class="w-full h-auto rounded-lg shadow-xl border-4 border-blue-200 object-cover mx-auto transition duration-300 hover:scale-[1.02]"
-            onerror="this.src='https://placehold.co/800x600/ff6666/ffffff?text=圖片載入失敗'"
-        >
+        <!-- 載入指示器 -->
+        <div id="loading-indicator" class="absolute inset-0 bg-white flex flex-col items-center justify-center z-10">
+             <div class="lds-dual-ring"></div>
+             <p class="mt-4 font-semibold text-gray-500">正在連線至雲端服務...</p>
+        </div>
 
-        <p class="mt-8 text-sm text-gray-400">網站部署測試成功！</p>
+        <!-- 聊天介面內容 (初始隱藏，直到服務連線成功) -->
+        <div id="chat-interface" class="flex flex-col flex-grow h-full hidden">
+            <!-- 頂部標頭 - 包含名稱設定 -->
+            <header class="p-4 bg-gray-800 text-white flex flex-col sm:flex-row justify-between items-center shadow-lg">
+                <h1 class="text-xl font-bold mb-2 sm:mb-0">💬 即時協作留言板</h1>
+                
+                <!-- 名稱輸入和 UID 區 -->
+                <div class="flex items-center space-x-2 w-full sm:w-auto">
+                    <p id="user-id-display" class="text-xs text-gray-400 whitespace-nowrap hidden sm:block"></p>
+                    <div class="flex items-center w-full">
+                        <input type="text" id="name-input-field" placeholder="輸入您的名稱 (至少 2 字)"
+                               class="w-full p-2 border rounded-l-lg text-gray-900 text-sm focus:ring-blue-500 focus:border-blue-500 transition duration-100" maxlength="15">
+                        <span class="bg-blue-500 text-white p-2 rounded-r-lg text-sm font-semibold whitespace-nowrap">名稱</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- 錯誤或訊息顯示區 -->
+            <div id="message-box" class="p-2 bg-red-100 text-red-700 border-b border-red-300 hidden text-center text-sm">
+                <!-- 錯誤訊息或成功訊息將顯示在這裡 -->
+            </div>
+
+            <!-- 留言顯示區 (可滾動) -->
+            <div id="message-display" class="flex-grow p-4 overflow-y-auto space-y-4 bg-gray-50">
+                <!-- 留言將會被即時插入這裡。如果留言為空，將顯示提示。 -->
+            </div>
+
+            <!-- 訊息輸入區 -->
+            <div class="p-4 bg-white border-t border-gray-200">
+                <div class="flex items-center space-x-3">
+                    <input type="text" id="message-input" placeholder="輸入您的留言... (按下 Enter 發送)"
+                           class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" maxlength="255">
+                    <button id="send-button" disabled
+                            class="p-3 bg-gray-400 text-white rounded-lg transition duration-150 shadow-md whitespace-nowrap">
+                        請輸入名稱
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-2">您的發言將被永久儲存，並即時同步給所有使用者。</p>
+            </div>
+        </div>
+
     </div>
-
 </body>
 </html>
