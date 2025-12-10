@@ -17,6 +17,7 @@
         let auth;
         let userId;
         let userName = ''; // 用於儲存使用者輸入的名稱
+        const LOCAL_STORAGE_USERNAME_KEY = 'chat_username'; // 用於本地儲存使用者名稱
 
         // --- Firebase 初始化和認證 ---
         const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
@@ -33,25 +34,22 @@
             db = getFirestore(app);
             auth = getAuth(app);
             
+            // 從本地儲存載入使用者名稱
+            userName = localStorage.getItem(LOCAL_STORAGE_USERNAME_KEY) || '';
+            
             // 設置匿名登入/認證監聽器
             onAuthStateChanged(auth, async (user) => {
                 if (user) {
                     userId = user.uid;
                     console.log("用戶已登入，UID:", userId);
                     
-                    // 認證成功後，設置事件監聽器 (確保按鈕可用)
-                    setupEventListeners();
-
-                    // 檢查是否已設定使用者名稱
-                    if (!userName) {
-                        showNameInputModal();
-                    } else {
-                        // 認證成功且名稱已設定，啟動留言功能
-                        document.getElementById('user-id-display').textContent = `UID: ${userId}`;
-                        startMessageListener();
-                        document.getElementById('main-chat-container').classList.remove('hidden');
-                        document.getElementById('name-modal').classList.add('hidden');
-                    }
+                    // 認證成功後，啟動主介面功能
+                    setupUI();
+                    setupEventListeners(); // 確保事件已綁定
+                    startMessageListener();
+                    
+                    document.getElementById('main-chat-container').classList.remove('hidden');
+                    
                 } else {
                     console.log("正在嘗試匿名登入...");
                     // 處理登入邏輯
@@ -96,11 +94,22 @@
                     const data = change.doc.data();
                     const docId = change.doc.id;
 
+                    // 處理新增和修改 (當伺服器時間戳返回時，類型會從 'added' 變為 'modified' 或直接為 'added')
                     if (change.type === "added") {
-                        // 新增留言
+                        // 新增留言: 如果元素已存在 (因為是本地發送的)，則移除舊的（pending）並重新添加新的（server-confirmed）
+                        const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
+                        if (existingElement) {
+                            existingElement.remove();
+                        }
                         appendMessage(data, docId);
                     } else if (change.type === "modified") {
-                        // 留言修改 (本例中不預期會發生)
+                        // 留言修改 (例如：從 pending server timestamp 轉為實際時間戳)
+                        // 我們可以移除舊元素並重新添加，確保時間更新
+                         const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
+                        if (existingElement) {
+                            existingElement.remove();
+                        }
+                        appendMessage(data, docId);
                     } else if (change.type === "removed") {
                         // 留言刪除
                         const elementToRemove = document.querySelector(`[data-doc-id="${docId}"]`);
@@ -115,7 +124,14 @@
         
         // 發送留言
         async function sendMessage(text) {
-            if (!db || !userId || !userName || text.trim() === '') return;
+            // 檢查名稱是否設定
+            if (!userName || userName.length < 2) {
+                showMessage("請先在上方輸入您的使用者名稱 (至少 2 個字元)。", true);
+                document.getElementById('name-input-field').focus();
+                return;
+            }
+
+            if (!db || !userId || text.trim() === '') return;
 
             try {
                 await addDoc(collection(db, MESSAGE_COLLECTION_PATH), {
@@ -142,8 +158,11 @@
         
         // 格式化時間 (台灣時區 GMT+8)
         function formatTime(timestamp) {
-            // 檢查是否為 pending server timestamp (尚未被伺服器處理)
-            if (!timestamp || typeof timestamp.toDate !== 'function') return '發送中...'; 
+            // **修正點：更嚴格地檢查是否為有效的 Firestore Timestamp 物件**
+            // 檢查 toDate 函式是否存在。如果它處於發送中的 pending 狀態，它會被判斷為 '發送中...'
+            if (!timestamp || typeof timestamp.toDate !== 'function') {
+                return '發送中...'; 
+            }
 
             const date = timestamp.toDate();
             
@@ -193,7 +212,7 @@
             header.className = `flex text-xs mb-1 ${isCurrentUser ? 'justify-end text-blue-200' : 'justify-start text-gray-500'}`;
 
             const nameSpan = document.createElement('span');
-            nameSpan.textContent = isCurrentUser ? '您' : data.userName;
+            nameSpan.textContent = isCurrentUser ? (userName || '您') : data.userName;
             nameSpan.className = 'font-bold mr-2';
 
             const timeSpan = document.createElement('span');
@@ -220,26 +239,49 @@
             messageDiv.appendChild(contentDiv);
             messageDisplay.appendChild(messageDiv);
         }
-
-        // 顯示使用者名稱輸入模態框
-        function showNameInputModal() {
-            const modal = document.getElementById('name-modal');
-            modal.classList.remove('hidden');
-            document.getElementById('name-input').focus();
-        }
-
+        
         // 訊息輔助函數
         function showMessage(text, isError = false) {
             const messageBox = document.getElementById('message-box');
             messageBox.textContent = text;
-            messageBox.className = `mt-4 p-3 rounded-lg border text-center ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'}`;
+            messageBox.className = `p-2 bg-red-100 text-red-700 border-b border-red-300 text-center text-sm`;
             messageBox.classList.remove('hidden');
+            setTimeout(() => { messageBox.classList.add('hidden'); }, 5000); // 5秒後自動隱藏
         }
+
+        // 初始化 UI 狀態
+        function setupUI() {
+            document.getElementById('name-input-field').value = userName;
+            document.getElementById('user-id-display').textContent = `UID: ${userId}`;
+            updateChatButtonState();
+        }
+
+        // 更新發送按鈕狀態
+        function updateChatButtonState() {
+            const sendButton = document.getElementById('send-button');
+            const nameField = document.getElementById('name-input-field');
+            
+            if (userName.length < 2) {
+                sendButton.disabled = true;
+                sendButton.textContent = '請輸入名稱';
+                sendButton.classList.remove('bg-blue-600', 'hover:bg-blue-700');
+                sendButton.classList.add('bg-gray-400', 'cursor-not-allowed');
+                nameField.classList.add('border-red-500');
+            } else {
+                sendButton.disabled = false;
+                sendButton.textContent = '發送';
+                sendButton.classList.remove('bg-gray-400', 'cursor-not-allowed', 'border-red-500');
+                sendButton.classList.add('bg-blue-600', 'hover:bg-blue-700');
+                nameField.classList.remove('border-red-500');
+            }
+        }
+
 
         // 設定所有事件監聽器
         function setupEventListeners() {
             const messageInput = document.getElementById('message-input');
             const sendButton = document.getElementById('send-button');
+            const nameInputField = document.getElementById('name-input-field');
 
             // 點擊發送按鈕
             sendButton.addEventListener('click', () => {
@@ -253,25 +295,18 @@
                     sendMessage(messageInput.value);
                 }
             });
-
-            // 處理名稱輸入的確認
-            document.getElementById('start-chat-button').addEventListener('click', () => {
-                const input = document.getElementById('name-input');
-                const name = input.value.trim();
-                if (name.length < 2) {
-                    // 這裡不使用 alert，因為 alert 在 iFrame 中表現不佳，但為了快速修復流程暫時保留
-                    alert('使用者名稱至少需要 2 個字元！'); 
-                    return;
+            
+            // 監聽名稱輸入欄位的變動
+            nameInputField.addEventListener('input', () => {
+                const newName = nameInputField.value.trim();
+                if (newName.length >= 2) {
+                    userName = newName;
+                    localStorage.setItem(LOCAL_STORAGE_USERNAME_KEY, userName);
+                } else {
+                    // 如果名稱太短，只更新本地變數，但不允許發送
+                    userName = newName;
                 }
-                userName = name;
-                
-                // 修正：如果已成功通過認證且名稱已輸入，則直接切換 UI 並啟動監聽器
-                if (auth.currentUser && userName) {
-                    document.getElementById('user-id-display').textContent = `UID: ${auth.currentUser.uid}`;
-                    document.getElementById('name-modal').classList.add('hidden');
-                    document.getElementById('main-chat-container').classList.remove('hidden');
-                    startMessageListener(); 
-                }
+                updateChatButtonState();
             });
         }
         
@@ -291,28 +326,22 @@
 </head>
 <body class="p-4 sm:p-8">
 
-    <!-- 使用者名稱輸入模態框 (Modal) -->
-    <div id="name-modal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50">
-        <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm">
-            <h2 class="text-2xl font-bold text-gray-800 mb-4">👋 請輸入您的名稱</h2>
-            <p class="text-gray-600 mb-6">您將以這個名稱發送留言，名稱會被所有參與者看見。</p>
-            <input type="text" id="name-input" placeholder="例如：張三" 
-                   class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mb-4" maxlength="15">
-            <button id="start-chat-button" 
-                    class="w-full p-3 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700 transition duration-150 shadow-md">
-                開始聊天
-            </button>
-        </div>
-    </div>
-
-    <!-- 主聊天介面 -->
+    <!-- 主聊天介面 (始終可見) -->
     <div id="main-chat-container" class="max-w-3xl mx-auto h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden hidden">
 
-        <!-- 頂部標頭 -->
-        <header class="p-4 bg-gray-800 text-white flex justify-between items-center shadow-lg">
-            <h1 class="text-xl font-bold">💬 即時協作留言板</h1>
-            <!-- 顯示使用者 UID，用於識別 -->
-            <p id="user-id-display" class="text-xs text-gray-400"></p>
+        <!-- 頂部標頭 - 包含名稱設定 -->
+        <header class="p-4 bg-gray-800 text-white flex flex-col sm:flex-row justify-between items-center shadow-lg">
+            <h1 class="text-xl font-bold mb-2 sm:mb-0">💬 即時協作留言板</h1>
+            
+            <!-- 名稱輸入和 UID 區 -->
+            <div class="flex items-center space-x-2 w-full sm:w-auto">
+                <p id="user-id-display" class="text-xs text-gray-400 whitespace-nowrap hidden sm:block"></p>
+                <div class="flex items-center w-full">
+                    <input type="text" id="name-input-field" placeholder="輸入您的名稱 (至少 2 字)"
+                           class="w-full p-2 border rounded-l-lg text-gray-900 text-sm focus:ring-blue-500 focus:border-blue-500 transition duration-100" maxlength="15">
+                    <span class="bg-blue-500 text-white p-2 rounded-r-lg text-sm font-semibold whitespace-nowrap">名稱</span>
+                </div>
+            </div>
         </header>
 
         <!-- 錯誤或訊息顯示區 -->
@@ -330,9 +359,9 @@
             <div class="flex items-center space-x-3">
                 <input type="text" id="message-input" placeholder="輸入您的留言... (按下 Enter 發送)"
                        class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" maxlength="255">
-                <button id="send-button"
-                        class="p-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-150 shadow-md">
-                    發送
+                <button id="send-button" disabled
+                        class="p-3 bg-gray-400 text-white rounded-lg transition duration-150 shadow-md whitespace-nowrap">
+                    請輸入名稱
                 </button>
             </div>
             <p class="text-xs text-gray-400 mt-2">您的發言將被永久儲存，並即時同步給所有使用者。</p>
