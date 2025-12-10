@@ -39,16 +39,19 @@
             
             // 設置匿名登入/認證監聽器
             onAuthStateChanged(auth, async (user) => {
+                const loadingIndicator = document.getElementById('loading-indicator');
+                
                 if (user) {
                     userId = user.uid;
                     console.log("用戶已登入，UID:", userId);
                     
-                    // 認證成功後，啟動主介面功能
+                    // 認證成功後，移除載入提示，啟動主介面功能
+                    loadingIndicator.classList.add('hidden');
+                    document.getElementById('chat-interface').classList.remove('hidden');
+                    
                     setupUI();
                     setupEventListeners(); // 確保事件已綁定
                     startMessageListener();
-                    
-                    document.getElementById('main-chat-container').classList.remove('hidden');
                     
                 } else {
                     console.log("正在嘗試匿名登入...");
@@ -58,9 +61,11 @@
                              await signInWithCustomToken(auth, __initial_auth_token);
                          } catch (error) {
                              console.error("自訂令牌登入失敗:", error);
+                             // 如果自訂令牌失敗，嘗試匿名登入
                              signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
                          }
                      } else {
+                         // 匿名登入
                          signInAnonymously(auth).catch(err => console.error("匿名登入失敗:", err));
                      }
                 }
@@ -158,7 +163,6 @@
         
         // 格式化時間 (台灣時區 GMT+8)
         function formatTime(timestamp) {
-            // **修正點：更嚴格地檢查是否為有效的 Firestore Timestamp 物件**
             // 檢查 toDate 函式是否存在。如果它處於發送中的 pending 狀態，它會被判斷為 '發送中...'
             if (!timestamp || typeof timestamp.toDate !== 'function') {
                 return '發送中...'; 
@@ -322,49 +326,83 @@
             min-height: 100vh;
             background-color: #f3f4f6; /* 淺灰色背景 */
         }
+        .lds-dual-ring {
+            display: inline-block;
+            width: 80px;
+            height: 80px;
+        }
+        .lds-dual-ring:after {
+            content: " ";
+            display: block;
+            width: 64px;
+            height: 64px;
+            margin: 8px;
+            border-radius: 50%;
+            border: 6px solid #ccc;
+            border-color: #3b82f6 transparent #3b82f6 transparent;
+            animation: lds-dual-ring 1.2s linear infinite;
+        }
+        @keyframes lds-dual-ring {
+            0% {
+                transform: rotate(0deg);
+            }
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
     </style>
 </head>
 <body class="p-4 sm:p-8">
 
     <!-- 主聊天介面 (始終可見) -->
-    <div id="main-chat-container" class="max-w-3xl mx-auto h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden hidden">
+    <div id="main-chat-container" class="max-w-3xl mx-auto h-[90vh] flex flex-col rounded-xl bg-white shadow-2xl overflow-hidden">
+        
+        <!-- 載入指示器 -->
+        <div id="loading-indicator" class="flex flex-col items-center justify-center flex-grow p-10 text-gray-500">
+            <div class="lds-dual-ring"></div>
+            <p class="mt-4 font-semibold">正在連線至雲端服務...</p>
+        </div>
 
-        <!-- 頂部標頭 - 包含名稱設定 -->
-        <header class="p-4 bg-gray-800 text-white flex flex-col sm:flex-row justify-between items-center shadow-lg">
-            <h1 class="text-xl font-bold mb-2 sm:mb-0">💬 即時協作留言板</h1>
-            
-            <!-- 名稱輸入和 UID 區 -->
-            <div class="flex items-center space-x-2 w-full sm:w-auto">
-                <p id="user-id-display" class="text-xs text-gray-400 whitespace-nowrap hidden sm:block"></p>
-                <div class="flex items-center w-full">
-                    <input type="text" id="name-input-field" placeholder="輸入您的名稱 (至少 2 字)"
-                           class="w-full p-2 border rounded-l-lg text-gray-900 text-sm focus:ring-blue-500 focus:border-blue-500 transition duration-100" maxlength="15">
-                    <span class="bg-blue-500 text-white p-2 rounded-r-lg text-sm font-semibold whitespace-nowrap">名稱</span>
+        <!-- 聊天介面內容 (初始隱藏，直到認證完成) -->
+        <div id="chat-interface" class="flex flex-col flex-grow h-full hidden">
+            <!-- 頂部標頭 - 包含名稱設定 -->
+            <header class="p-4 bg-gray-800 text-white flex flex-col sm:flex-row justify-between items-center shadow-lg">
+                <h1 class="text-xl font-bold mb-2 sm:mb-0">💬 即時協作留言板</h1>
+                
+                <!-- 名稱輸入和 UID 區 -->
+                <div class="flex items-center space-x-2 w-full sm:w-auto">
+                    <p id="user-id-display" class="text-xs text-gray-400 whitespace-nowrap hidden sm:block"></p>
+                    <div class="flex items-center w-full">
+                        <input type="text" id="name-input-field" placeholder="輸入您的名稱 (至少 2 字)"
+                               class="w-full p-2 border rounded-l-lg text-gray-900 text-sm focus:ring-blue-500 focus:border-blue-500 transition duration-100" maxlength="15">
+                        <span class="bg-blue-500 text-white p-2 rounded-r-lg text-sm font-semibold whitespace-nowrap">名稱</span>
+                    </div>
                 </div>
+            </header>
+
+            <!-- 錯誤或訊息顯示區 -->
+            <div id="message-box" class="p-2 bg-red-100 text-red-700 border-b border-red-300 hidden text-center text-sm">
+                <!-- 錯誤訊息或成功訊息將顯示在這裡 -->
             </div>
-        </header>
 
-        <!-- 錯誤或訊息顯示區 -->
-        <div id="message-box" class="p-2 bg-red-100 text-red-700 border-b border-red-300 hidden text-center text-sm">
-            <!-- 錯誤訊息或成功訊息將顯示在這裡 -->
-        </div>
-
-        <!-- 留言顯示區 (可滾動) -->
-        <div id="message-display" class="flex-grow p-4 overflow-y-auto space-y-4 bg-gray-50">
-            <!-- 留言將會被即時插入這裡。如果留言為空，將顯示提示。 -->
-        </div>
-
-        <!-- 訊息輸入區 -->
-        <div class="p-4 bg-white border-t border-gray-200">
-            <div class="flex items-center space-x-3">
-                <input type="text" id="message-input" placeholder="輸入您的留言... (按下 Enter 發送)"
-                       class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" maxlength="255">
-                <button id="send-button" disabled
-                        class="p-3 bg-gray-400 text-white rounded-lg transition duration-150 shadow-md whitespace-nowrap">
-                    請輸入名稱
-                </button>
+            <!-- 留言顯示區 (可滾動) -->
+            <div id="message-display" class="flex-grow p-4 overflow-y-auto space-y-4 bg-gray-50">
+                <!-- 留言將會被即時插入這裡。如果留言為空，將顯示提示。 -->
             </div>
-            <p class="text-xs text-gray-400 mt-2">您的發言將被永久儲存，並即時同步給所有使用者。</p>
+
+            <!-- 訊息輸入區 -->
+            <div class="p-4 bg-white border-t border-gray-200">
+                <div class="flex items-center space-x-3">
+                    <input type="text" id="message-input" placeholder="輸入您的留言... (按下 Enter 發送)"
+                           class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500" maxlength="255">
+                    <button id="send-button" disabled
+                            class="p-3 bg-gray-400 text-white rounded-lg transition duration-150 shadow-md whitespace-nowrap">
+                        請輸入名稱
+                    </button>
+                </div>
+                <p class="text-xs text-gray-400 mt-2">您的發言將被永久儲存，並即時同步給所有使用者。</p>
+            </div>
         </div>
 
     </div>
