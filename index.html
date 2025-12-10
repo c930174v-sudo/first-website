@@ -24,57 +24,62 @@
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 
         async function initApp() {
-            // 由於 onAuthStateChanged 監聽器是異步的，我們將在它內部處理所有 UI 顯示邏輯
-            
+            const loadingIndicator = document.getElementById('loading-indicator');
+            const chatInterface = document.getElementById('chat-interface');
+
             if (Object.keys(firebaseConfig).length === 0) {
-                // 致命錯誤：無法連線
-                document.getElementById('loading-indicator').innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。</p>';
+                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">致命錯誤：缺少 Firebase 設定。</p>';
                 return;
             }
 
-            const app = initializeApp(firebaseConfig);
-            db = getFirestore(app);
-            auth = getAuth(app);
-            
-            // 設置匿名登入/認證監聽器
-            onAuthStateChanged(auth, async (user) => {
-                const loadingIndicator = document.getElementById('loading-indicator');
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
 
-                if (user) {
-                    userId = user.uid;
-                    isAuthReady = true;
-                    console.log("用戶已登入，UID:", userId);
-                    
-                    // 認證成功後，移除載入提示，顯示聊天介面
-                    loadingIndicator.classList.add('hidden');
-                    document.getElementById('chat-interface').classList.remove('hidden');
-                    
-                    // 啟動功能
-                    setupUI();
-                    startMessageListener();
-                    
-                } else {
-                    // 如果用戶狀態為空 (初次載入)
-                    try {
-                        console.log("正在嘗試登入...");
-                        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                            await signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await signInAnonymously(auth);
-                        }
-                    } catch (error) {
-                        // 登入失敗的錯誤處理
+                // **關鍵修正點 1: 服務初始化完成後，立即顯示 UI 並開始登入**
+                // 不再等待 onAuthStateChanged 成功才顯示 UI，防止卡住
+                loadingIndicator.classList.add('hidden');
+                chatInterface.classList.remove('hidden');
+
+                // 啟動功能
+                setupEventListeners();
+                
+                // 嘗試處理登入流程
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
                         isAuthReady = true;
-                        loadingIndicator.innerHTML = `<p class="mt-4 text-red-600 font-semibold">登入失敗，請檢查網路。錯誤碼: ${error.code}</p>`;
-                        console.error("Firebase 登入失敗:", error);
-                        document.getElementById('chat-interface').classList.add('hidden'); // 隱藏聊天介面
+                        console.log("用戶已登入，UID:", userId);
+                        
+                        setupUI();
+                        startMessageListener();
+                        
+                    } else {
+                        // 如果用戶狀態為空 (初次載入或登出)
+                        try {
+                            console.log("正在嘗試登入...");
+                            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                                await signInWithCustomToken(auth, __initial_auth_token);
+                            } else {
+                                await signInAnonymously(auth);
+                            }
+                        } catch (error) {
+                            // 登入失敗：顯示錯誤並停用發送按鈕
+                            isAuthReady = false;
+                            showMessage(`警告：連線至 Firebase 失敗 (${error.code})。留言功能可能無法使用。`, true);
+                            document.getElementById('send-button').disabled = true;
+                            document.getElementById('send-button').textContent = '連線失敗';
+                            console.error("Firebase 登入失敗:", error);
+                        }
                     }
-                }
-            });
-            
-            // **修正點 1: 在 onAuthStateChanged 外部先綁定事件**
-            // 這樣可以確保即使認證流程還在跑，輸入名稱欄位也能工作，防止按鈕失效。
-            setupEventListeners(); 
+                });
+
+            } catch (error) {
+                // 如果連初始化 Firebase 服務都失敗 (例如 SDK 載入問題)
+                loadingIndicator.innerHTML = '<p class="mt-4 text-red-600 font-semibold">初始化服務失敗，請檢查網頁控制台。</p>';
+                console.error("Firebase 初始化失敗:", error);
+            }
         }
         
         // --- 留言資料庫操作 ---
@@ -109,17 +114,18 @@
                     const existingElement = document.querySelector(`[data-doc-id="${docId}"]`);
                     
                     if (change.type === "added") {
-                        // 僅在元素不存在時新增，如果存在（表示是本地發送的 pending 狀態），等待 modified
+                        // 新增：如果元素不存在則新增
                         if (!existingElement) {
                             appendMessage(data, docId);
                         }
                     } else if (change.type === "modified") {
-                        // 伺服器時間戳返回時 (modified)
+                        // 修改：伺服器時間戳返回時，移除舊的，替換成新的
                         if (existingElement) {
                             existingElement.remove();
                         }
                         appendMessage(data, docId);
                     } else if (change.type === "removed") {
+                        const elementToRemove = document.querySelector(`[data-doc-id="${docId}"]`);
                         if (elementToRemove) elementToRemove.remove();
                     }
                 });
@@ -130,6 +136,10 @@
         
         // 發送留言
         async function sendMessage(text) {
+            if (!isAuthReady) {
+                showMessage("系統尚未連線，無法發送留言。", true);
+                return;
+            }
             // 檢查名稱是否設定
             if (!userName || userName.length < 2) {
                 showMessage("請先在上方輸入您的使用者名稱 (至少 2 個字元)。", true);
