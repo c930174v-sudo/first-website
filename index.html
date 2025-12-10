@@ -3,9 +3,294 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>照片拖曳顯示器</title>
-    <!-- 引入 Tailwind CSS 確保響應式和現代化的樣式 -->
+    <title>照片拖曳顯示器 (多人雲端版)</title>
+    <!-- 引入 Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 引入 Firebase SDK (版本 11.6.1) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, onSnapshot, query, orderBy, addDoc, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getStorage, ref, uploadBytes, getDownloadURL } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-storage.js";
+        
+        // --- 全局變數 ---
+        let db;
+        let auth;
+        let storage;
+        let userId;
+
+        // --- Firebase 初始化和認證 ---
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const __initial_auth_token = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        async function initApp() {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase configuration is missing.");
+                // 顯示錯誤訊息給用戶
+                document.getElementById('message-box').textContent = "錯誤：缺少 Firebase 設定。無法啟用雲端儲存功能。";
+                document.getElementById('message-box').classList.remove('hidden');
+                return;
+            }
+
+            const app = initializeApp(firebaseConfig);
+            db = getFirestore(app);
+            auth = getAuth(app);
+            storage = getStorage(app);
+
+            // 設置匿名登入/認證監聽器
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    console.log("用戶已登入，UID:", userId);
+                    document.getElementById('user-id-display').textContent = `使用者 ID: ${userId}`;
+                    
+                    // 認證成功後，啟動所有 Firestore 監聽和事件處理器
+                    setupEventListeners();
+                    startImageListener();
+                } else {
+                    console.log("正在嘗試匿名登入...");
+                    // 如果沒有使用者，則執行匿名登入
+                    signInAnonymously(auth).catch((error) => {
+                        console.error("匿名登入失敗:", error);
+                        document.getElementById('message-box').textContent = `登入失敗：${error.message}`;
+                        document.getElementById('message-box').classList.remove('hidden');
+                    });
+                }
+            });
+
+            // 檢查是否有初始自訂令牌並使用它登入
+            if (__initial_auth_token) {
+                try {
+                    await auth.signInWithCustomToken(__initial_auth_token);
+                } catch (error) {
+                    console.error("自訂令牌登入失敗:", error);
+                    // 如果自訂令牌失敗，讓 onAuthStateChanged 嘗試匿名登入
+                }
+            } else {
+                // 如果沒有自訂令牌，讓 onAuthStateChanged 處理匿名登入
+            }
+        }
+        
+        // --- Firestore 監聽與即時顯示 ---
+        function startImageListener() {
+            // 公開資料的路徑：/artifacts/{appId}/public/data/images
+            const imageCollectionPath = `artifacts/${appId}/public/data/images`;
+            const imageRef = collection(db, imageCollectionPath);
+            
+            // 查詢：按照時間戳降序排序 (最新的在最前面)
+            const q = query(imageRef, orderBy("timestamp", "desc"));
+
+            // 設置即時監聽器
+            onSnapshot(q, (snapshot) => {
+                const existingIds = new Set();
+                const newImages = [];
+
+                // 收集已顯示的圖片 ID
+                document.querySelectorAll('#image-display > div').forEach(div => {
+                    existingIds.add(div.dataset.docId);
+                });
+
+                // 處理所有變更
+                snapshot.docChanges().forEach(change => {
+                    const data = change.doc.data();
+                    const docId = change.doc.id;
+                    data.id = docId;
+
+                    if (change.type === "added" && !existingIds.has(docId)) {
+                        // 新增的圖片：只處理未顯示過的
+                        newImages.push(data);
+                    } else if (change.type === "removed") {
+                        // 移除的圖片：從 DOM 中刪除
+                        const elementToRemove = document.querySelector(`[data-doc-id="${docId}"]`);
+                        if (elementToRemove) {
+                            elementToRemove.remove();
+                        }
+                    }
+                    // "modified" 暫時不需要處理，因為圖片資料不會變動
+                });
+
+                // 將新的圖片插入到顯示區的最前面
+                newImages.forEach(imgData => {
+                    createImageElement(imgData.url, imgData.name, imgData.id, imgData.uploaderId);
+                });
+                
+                if (document.getElementById('image-display').children.length === 0) {
+                    document.getElementById('empty-message').classList.remove('hidden');
+                } else {
+                    document.getElementById('empty-message').classList.add('hidden');
+                }
+
+                console.log(`即時更新：載入了 ${newImages.length} 張新圖片。`);
+            });
+        }
+        
+        // --- 圖片處理與上傳 ---
+
+        // 創建圖片元素的 DOM 結構
+        function createImageElement(url, name, docId, uploaderId) {
+            // 檢查是否已存在，防止重複添加
+            if (document.querySelector(`[data-doc-id="${docId}"]`)) return;
+
+            const imgContainer = document.createElement('div');
+            // 將 Firestore Document ID 存為資料屬性，以便追蹤
+            imgContainer.dataset.docId = docId; 
+            imgContainer.className = 'bg-white p-4 rounded-xl shadow-lg hover:shadow-2xl transition duration-300 overflow-hidden flex flex-col space-y-3';
+            
+            // 圖片元素
+            const img = document.createElement('img');
+            img.src = url; 
+            img.alt = name;
+            img.className = 'w-full h-48 object-cover rounded-lg border border-gray-100';
+
+            // 資訊區塊
+            const infoDiv = document.createElement('div');
+            infoDiv.className = 'text-sm';
+            
+            const nameTag = document.createElement('p');
+            nameTag.textContent = name;
+            nameTag.title = name;
+            nameTag.className = 'font-semibold text-gray-800 truncate';
+
+            const uploaderTag = document.createElement('p');
+            // 僅顯示 uploaderId 的前 8 個字符
+            const displayUploaderId = uploaderId ? uploaderId.substring(0, 8) : 'Unknown';
+            uploaderTag.textContent = `上傳者: ${displayUploaderId}...`;
+            uploaderTag.className = 'text-xs text-gray-500';
+
+            infoDiv.appendChild(nameTag);
+            infoDiv.appendChild(uploaderTag);
+
+            imgContainer.appendChild(img);
+            imgContainer.appendChild(infoDiv);
+
+            // 將容器加入到顯示區的最前面 (最新的在最上面)
+            document.getElementById('image-display').prepend(imgContainer);
+        }
+
+        // 處理單個檔案的上傳
+        async function uploadFile(file) {
+            // 檢查是否已初始化
+            if (!db || !storage) {
+                showMessage("系統未準備就緒。請等待認證完成。", true);
+                return;
+            }
+
+            // 1. 檢查檔案類型
+            if (!file.type.startsWith('image/')) {
+                showMessage(`檔案 "${file.name}" 不是有效的圖片格式。`, true);
+                return;
+            }
+
+            showMessage(`正在上傳 "${file.name}"... 請稍候。`, false);
+            
+            try {
+                // 2. 檔案上傳到 Cloud Storage
+                // 檔案路徑：images/{appId}/{userId}/{檔名}
+                const storagePath = `images/${appId}/${userId}/${Date.now()}_${file.name}`;
+                const storageRef = ref(storage, storagePath);
+                
+                await uploadBytes(storageRef, file);
+                const downloadURL = await getDownloadURL(storageRef);
+
+                // 3. 檔案資訊儲存到 Firestore
+                const imageCollectionPath = `artifacts/${appId}/public/data/images`;
+                await addDoc(collection(db, imageCollectionPath), {
+                    name: file.name,
+                    url: downloadURL,
+                    uploaderId: userId,
+                    timestamp: serverTimestamp(),
+                    storagePath: storagePath
+                });
+
+                showMessage(`"${file.name}" 成功上傳並分享！`, false);
+
+            } catch (error) {
+                console.error("上傳失敗:", error);
+                showMessage(`上傳 "${file.name}" 失敗: ${error.message}`, true);
+            }
+        }
+
+        // 處理拖曳或選擇的多個檔案
+        function handleFiles(files) {
+            if (files.length === 0) return;
+
+            let validFileCount = 0;
+            for (const file of files) {
+                if (file.type.startsWith('image/')) {
+                    uploadFile(file);
+                    validFileCount++;
+                }
+            }
+            if (validFileCount === 0) {
+                 showMessage("沒有選擇任何圖片檔案。", true);
+            }
+        }
+
+        // --- 事件監聽器設定 (在認證成功後才呼叫) ---
+        function setupEventListeners() {
+            const dropZone = document.getElementById('drop-zone');
+            const fileInput = document.getElementById('file-input');
+
+            // 1. 拖曳檔案進入/越過 (Drag Enter/Over) 事件
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault(); 
+                    e.stopPropagation();
+                    dropZone.classList.add('drag-over');
+                }, false);
+            });
+
+            // 2. 拖曳檔案離開/放下 (Drag Leave/Drop) 事件
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropZone.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropZone.classList.remove('drag-over');
+                }, false);
+            });
+            
+            // 3. 拖曳放下 (Drop) 事件：處理檔案
+            dropZone.addEventListener('drop', (e) => {
+                handleFiles(e.dataTransfer.files);
+            }, false);
+            
+            // 4. 點擊區域選擇檔案 (Click to Select)
+            dropZone.addEventListener('click', () => {
+                fileInput.click();
+            });
+
+            // 5. 檔案輸入框變化 (File Input Change) 事件
+            fileInput.addEventListener('change', (e) => {
+                handleFiles(e.target.files);
+                e.target.value = null; 
+            });
+
+            // 額外處理整個視窗的拖曳事件，防止拖曳到非指定區域時檔案在新分頁打開
+            document.body.addEventListener('dragover', (e) => {
+                e.preventDefault();
+            }, false);
+            document.body.addEventListener('drop', (e) => {
+                e.preventDefault();
+            }, false);
+
+            // 清除按鈕事件
+            document.getElementById('clear-display-btn').addEventListener('click', () => {
+                document.getElementById('image-display').innerHTML = '';
+                document.getElementById('empty-message').classList.remove('hidden');
+                showMessage("已清除本地顯示，但雲端照片仍然存在。", true);
+            });
+        }
+
+        // 初始化應用程式
+        window.onload = initApp;
+
+        // 確保函數在模塊外部可訪問（供其他程式碼使用，雖然本例中不需要）
+        window.showMessage = showMessage;
+        window.hideMessage = hideMessage;
+
+    </script>
+
     <style>
         /* 設置全局字體為 Inter */
         body {
@@ -24,166 +309,49 @@
 </head>
 <body class="bg-gray-50 p-4 sm:p-8">
 
-    <div class="max-w-4xl mx-auto">
-        <header class="text-center mb-10">
-            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">📸 照片拖曳預覽</h1>
-            <p class="text-gray-500 text-lg">將您的圖片檔案拖曳到下方區域即可顯示。</p>
+    <div class="max-w-6xl mx-auto">
+        <header class="text-center mb-8">
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-900 mb-2">☁️ 雲端協作照片牆</h1>
+            <p class="text-gray-500 text-lg">拖曳圖片到下方區域，即刻分享給所有使用此網站的人！</p>
+            <!-- 用戶 ID 顯示區 -->
+            <p id="user-id-display" class="text-xs text-gray-400 mt-2"></p>
         </header>
 
         <!-- 拖曳區 (Drop Zone) -->
         <div id="drop-zone" 
-             class="w-full h-64 flex items-center justify-center p-6 border-4 border-dashed border-gray-300 rounded-xl cursor-pointer hover:border-blue-400 bg-white shadow-lg mb-10">
-            <p class="text-xl font-semibold text-gray-500">將圖片拖曳到此處或點擊選擇檔案</p>
+             class="w-full h-48 flex flex-col items-center justify-center p-6 border-4 border-dashed border-gray-300 rounded-xl cursor-pointer hover:border-blue-400 bg-white shadow-xl mb-6">
+            <svg class="w-12 h-12 text-blue-500 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+            <p class="text-xl font-semibold text-gray-500">拖曳圖片到此處，或點擊選擇檔案上傳</p>
+            <p class="text-sm text-gray-400">（圖片將永久儲存在雲端並即時同步）</p>
             <!-- 隱藏的檔案輸入框，用於點擊時選擇檔案 -->
             <input type="file" id="file-input" accept="image/*" multiple class="hidden">
         </div>
 
-        <!-- 圖片顯示區 (Image Display Area) -->
-        <h2 class="text-2xl font-bold text-gray-800 mb-4">🖼️ 載入的圖片</h2>
-        <div id="image-display" 
-             class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-            <!-- 載入的圖片將會顯示在這裡 -->
+        <!-- 錯誤或訊息顯示區 -->
+        <div id="message-box" class="mt-4 p-3 bg-red-100 text-red-700 border border-red-300 rounded-lg hidden text-center">
+            <!-- 錯誤訊息或成功訊息將顯示在這裡 -->
         </div>
 
-        <!-- 錯誤或訊息顯示區 -->
-        <div id="message-box" class="mt-8 p-4 bg-red-100 text-red-700 border border-red-300 rounded-lg hidden">
-            <!-- 錯誤訊息將顯示在這裡 -->
+        <!-- 圖片顯示區標題與操作 -->
+        <div class="flex justify-between items-center mb-4 mt-10">
+            <h2 class="text-2xl font-bold text-gray-800">🖼️ 共享圖片牆</h2>
+            <button id="clear-display-btn" class="px-4 py-2 bg-red-500 text-white text-sm font-semibold rounded-lg hover:bg-red-600 transition duration-150 shadow-md">
+                清除本地顯示
+            </button>
+        </div>
+        
+        <!-- 圖片顯示區 (Image Display Area) -->
+        <div id="image-display" 
+             class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+            <!-- 載入的雲端圖片將會顯示在這裡 -->
+        </div>
+
+        <!-- 顯示圖片為空時的訊息 -->
+        <div id="empty-message" class="text-center p-10 mt-10 text-gray-500 bg-white rounded-xl shadow-inner border border-gray-200 hidden">
+            <svg class="w-16 h-16 mx-auto mb-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+            <p class="text-lg font-medium">還沒有人上傳圖片！快成為第一個分享的人吧。</p>
         </div>
 
     </div>
-
-    <script>
-        // 獲取 DOM 元素
-        const dropZone = document.getElementById('drop-zone');
-        const imageDisplay = document.getElementById('image-display');
-        const fileInput = document.getElementById('file-input');
-        const messageBox = document.getElementById('message-box');
-
-        // --- 輔助函數 ---
-
-        // 顯示訊息或錯誤
-        function showMessage(text, isError = false) {
-            messageBox.textContent = text;
-            messageBox.className = `mt-8 p-4 rounded-lg border ${isError ? 'bg-red-100 text-red-700 border-red-300' : 'bg-green-100 text-green-700 border-green-300'}`;
-            messageBox.classList.remove('hidden');
-        }
-
-        // 隱藏訊息框
-        function hideMessage() {
-            messageBox.classList.add('hidden');
-        }
-
-        // 處理單個檔案的讀取與顯示
-        function processFile(file) {
-            // 檢查檔案類型是否為圖片
-            if (!file.type.startsWith('image/')) {
-                showMessage(`檔案 "${file.name}" 不是有效的圖片格式。`, true);
-                return;
-            }
-
-            const reader = new FileReader();
-
-            // 檔案讀取完成後觸發
-            reader.onload = function(e) {
-                // 1. 建立一個新的圖片容器 (div)
-                const imgContainer = document.createElement('div');
-                imgContainer.className = 'bg-white p-2 rounded-lg shadow-md hover:shadow-xl transition duration-300 overflow-hidden';
-
-                // 2. 建立一個 img 元素
-                const img = document.createElement('img');
-                img.src = e.target.result; // 將檔案的 Data URL 賦值給 src
-                img.alt = file.name;
-                img.className = 'w-full h-auto object-cover rounded-md';
-
-                // 3. 建立檔案名稱標籤
-                const nameTag = document.createElement('p');
-                nameTag.textContent = file.name;
-                nameTag.title = file.name;
-                nameTag.className = 'mt-2 text-sm text-gray-600 truncate'; // truncate 讓長檔名不會溢出
-
-                // 4. 將元素加入到容器
-                imgContainer.appendChild(img);
-                imgContainer.appendChild(nameTag);
-
-                // 5. 將容器加入到顯示區的最前面 (最新的在最上面)
-                imageDisplay.prepend(imgContainer);
-            };
-
-            // 開始讀取檔案，將其轉換為 Data URL (Base64 編碼)
-            reader.readAsDataURL(file);
-        }
-
-        // 處理拖曳或選擇的多個檔案
-        function handleFiles(files) {
-            hideMessage();
-            if (files.length === 0) {
-                showMessage("沒有選擇任何檔案。", true);
-                return;
-            }
-
-            let validFileCount = 0;
-            for (const file of files) {
-                if (file.type.startsWith('image/')) {
-                    processFile(file);
-                    validFileCount++;
-                }
-            }
-            
-            if (validFileCount > 0) {
-                showMessage(`成功載入 ${validFileCount} 張圖片！`, false);
-            }
-        }
-
-        // --- 事件監聽器 ---
-
-        // 1. 拖曳檔案進入 (Drag Enter/Over) 事件：顯示視覺回饋
-        ['dragenter', 'dragover'].forEach(eventName => {
-            dropZone.addEventListener(eventName, (e) => {
-                e.preventDefault(); // 阻止瀏覽器預設行為
-                e.stopPropagation();
-                dropZone.classList.add('drag-over');
-            }, false);
-        });
-
-        // 2. 拖曳檔案離開 (Drag Leave) 事件：移除視覺回饋
-        ['dragleave', 'drop'].forEach(eventName => {
-            dropZone.addEventListener(eventName, (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                dropZone.classList.remove('drag-over');
-            }, false);
-        });
-        
-        // 3. 拖曳放下 (Drop) 事件：處理檔案
-        dropZone.addEventListener('drop', (e) => {
-            // 獲取拖曳進來的檔案列表
-            const files = e.dataTransfer.files; 
-            handleFiles(files);
-        }, false);
-        
-        // 4. 點擊區域選擇檔案 (Click to Select)
-        dropZone.addEventListener('click', () => {
-            // 模擬點擊隱藏的檔案輸入框
-            fileInput.click();
-        });
-
-        // 5. 檔案輸入框變化 (File Input Change) 事件：處理選擇的檔案
-        fileInput.addEventListener('change', (e) => {
-            // 獲取使用者選擇的檔案列表
-            const files = e.target.files;
-            handleFiles(files);
-            // 清空輸入框，以便可以再次選擇相同的檔案
-            e.target.value = null; 
-        });
-
-        // 額外處理整個視窗的拖曳事件，防止拖曳到非指定區域時檔案在新分頁打開
-        document.body.addEventListener('dragover', (e) => {
-            e.preventDefault();
-        }, false);
-        document.body.addEventListener('drop', (e) => {
-            e.preventDefault();
-        }, false);
-        
-    </script>
 </body>
 </html>
